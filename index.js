@@ -4,10 +4,10 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 
 const connection = mysql.createConnection({
-  host: "localhost", // Ganti dengan host database Anda
-  user: "root", // Ganti dengan username database Anda
-  password: "", // Ganti dengan password database Anda
-  database: "casecommerce", // Ganti dengan nama database Anda
+  host: "localhost",
+  user: "root",
+  password: "",
+  database: "casecommerce",
 });
 
 const app = express();
@@ -17,7 +17,6 @@ const port = 4000;
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Menghubungkan ke database MySQL
 connection.connect((err) => {
   if (err) {
     console.error("Kesalahan koneksi:", err.stack);
@@ -33,7 +32,6 @@ app.get("/", (req, res) => {
   res.send("API is working");
 });
 
-// Product Routes
 app.post("/products", (req, res) => {
   const { name, description, price, stock } = req.body;
   const INSERT_QUERY = `INSERT INTO product (name, description, price, stock) VALUES (?, ?, ?, ?)`;
@@ -105,7 +103,6 @@ app.delete("/products/:id", (req, res) => {
   });
 });
 
-// Add product to cart
 app.post("/cart", (req, res) => {
   const { userId, productId, quantity } = req.body;
 
@@ -189,7 +186,6 @@ app.post("/cart", (req, res) => {
   };
 });
 
-// Get cart items
 app.get("/cart/:userId", (req, res) => {
   const userId = req.params.userId;
 
@@ -211,7 +207,6 @@ app.get("/cart/:userId", (req, res) => {
   });
 });
 
-// Delete product from cart
 app.delete("/cart", (req, res) => {
   const { userId, productId } = req.body;
 
