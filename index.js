@@ -32,13 +32,48 @@ app.get("/", (req, res) => {
   res.send("API is working");
 });
 
+app.get("/categories", (req, res) => {
+  const SELECT_QUERY = "SELECT id, name FROM product_category";
+  connection.query(SELECT_QUERY, (error, results) => {
+    if (error) {
+      console.error("Kesalahan query:", error.stack);
+      res
+        .status(500)
+        .json({ error: "Terjadi kesalahan saat mengambil data dari database" });
+      return;
+    }
+    res.status(200).json(results);
+  });
+});
+
+// server.js (atau file yang sesuai untuk server Anda)
+app.get("/products/category/:categoryId", (req, res) => {
+  const categoryId = req.params.categoryId;
+
+  const SELECT_QUERY = `
+    SELECT p.id, p.name, p.description, p.price, p.stock
+    FROM product p
+    WHERE p.category_id = ?
+  `;
+
+  connection.query(SELECT_QUERY, [categoryId], (error, results) => {
+    if (error) {
+      console.error("Kesalahan query:", error.stack);
+      return res
+        .status(500)
+        .json({ error: "Terjadi kesalahan saat mengambil data produk" });
+    }
+    res.status(200).json(results);
+  });
+});
+
 app.post("/products", (req, res) => {
-  const { name, description, price, stock } = req.body;
-  const INSERT_QUERY = `INSERT INTO product (name, description, price, stock) VALUES (?, ?, ?, ?)`;
+  const { name, description, price, stock, category_id } = req.body;
+  const INSERT_QUERY = `INSERT INTO product (name, description, price, stock, category_id) VALUES (?, ?, ?, ?, ?)`;
   connection.query(
     INSERT_QUERY,
-    [name, description, price, stock],
-    (error, results, fields) => {
+    [name, description, price, stock, category_id],
+    (error, results) => {
       if (error) {
         console.error("Kesalahan query:", error.stack);
         res.status(500).json({
@@ -54,13 +89,19 @@ app.post("/products", (req, res) => {
 });
 
 app.get("/products", (req, res) => {
-  const sql = "SELECT * FROM product";
-  connection.query(sql, (err, results) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-    } else {
-      res.json(results);
+  const query = `
+    SELECT p.*, c.name AS category_name
+    FROM product p
+    LEFT JOIN product_category c ON p.category_id = c.id
+  `;
+
+  connection.query(query, (error, results) => {
+    if (error) {
+      console.error("Query error:", error);
+      res.status(500).json({ error: "Database query error" });
+      return;
     }
+    res.json(results);
   });
 });
 
@@ -107,7 +148,7 @@ app.post("/cart", (req, res) => {
   const { userId, productId, quantity } = req.body;
 
   // Check if the cart exists for the user, if not create one
-  let sql = "SELECT * FROM cart WHERE user_id = ?";
+  let sql = "SELECT cart_id FROM cart WHERE user_id = ?";
   connection.query(sql, [userId], (err, result) => {
     if (err) {
       console.error("Error executing query:", err);
@@ -161,7 +202,20 @@ app.post("/cart", (req, res) => {
               return;
             }
 
-            res.send({ message: "Product quantity updated in cart" });
+            // Retrieve updated cart item to ensure correctness
+            connection.query(
+              checkCartItemSql,
+              [cartId, productId],
+              (err, updatedResult) => {
+                if (err) {
+                  console.error("Error executing query:", err);
+                  res.status(500).send({ error: "Database query failed" });
+                  return;
+                }
+
+                res.send(updatedResult[0]); // Send updated item details
+              }
+            );
           }
         );
       } else {
@@ -178,7 +232,20 @@ app.post("/cart", (req, res) => {
               return;
             }
 
-            res.send({ message: "Product added to cart" });
+            // Retrieve newly added cart item to ensure correctness
+            connection.query(
+              checkCartItemSql,
+              [cartId, productId],
+              (err, updatedResult) => {
+                if (err) {
+                  console.error("Error executing query:", err);
+                  res.status(500).send({ error: "Database query failed" });
+                  return;
+                }
+
+                res.send(updatedResult[0]); // Send new item details
+              }
+            );
           }
         );
       }
@@ -189,13 +256,11 @@ app.post("/cart", (req, res) => {
 app.get("/cart/:userId", (req, res) => {
   const userId = req.params.userId;
 
+  // Query untuk mendapatkan cart_id berdasarkan userId
   let sql = `
-      SELECT p.product_id, p.name, p.description, p.price, ci.quantity
-      FROM cart_item ci
-      JOIN cart c ON ci.cart_id = c.cart_id
-      JOIN product p ON ci.product_id = p.product_id
-      WHERE c.user_id = ?
-    `;
+    SELECT cart_id FROM cart WHERE user_id = ?
+  `;
+
   connection.query(sql, [userId], (err, result) => {
     if (err) {
       console.error("Error executing query:", err);
@@ -203,7 +268,34 @@ app.get("/cart/:userId", (req, res) => {
       return;
     }
 
-    res.send(result);
+    if (result.length === 0) {
+      return res.status(404).send({ message: "Cart not found for user" });
+    }
+
+    const cartId = result[0].cart_id;
+
+    // Query untuk mendapatkan items di cart bersama dengan detail produk dan kategori
+    sql = `
+      SELECT ci.cart_item_id, ci.product_id, ci.quantity, p.name, p.description, p.price, p.stock, c.name AS category_name
+      FROM cart_item ci
+      JOIN product p ON ci.product_id = p.product_id
+      LEFT JOIN product_category c ON p.category_id = c.id
+      WHERE ci.cart_id = ?
+    `;
+
+    connection.query(sql, [cartId], (err, result) => {
+      if (err) {
+        console.error("Error executing query:", err);
+        res.status(500).send({ error: "Database query failed" });
+        return;
+      }
+
+      if (result.length === 0) {
+        res.status(404).send({ message: "No items found in cart" });
+      } else {
+        res.send(result);
+      }
+    });
   });
 });
 
@@ -232,6 +324,79 @@ app.put("/carts/:id", (req, res) => {
   db.query(sql, cart, (err, result) => {
     if (err) throw err;
     res.send(result);
+  });
+});
+
+app.post("/orders", (req, res) => {
+  const { user_id, total_price, status, items } = req.body;
+  console.log("Received order data:", { user_id, total_price, status, items });
+
+  if (!user_id || !total_price || !status || !items || items.length === 0) {
+    return res.status(400).json({ error: "Missing required fields or items" });
+  }
+
+  const sql = `INSERT INTO orders (user_id, total_price, status) VALUES (?, ?, ?)`;
+  connection.query(sql, [user_id, total_price, status], (error, result) => {
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ error: "Database error" });
+    }
+    const orderId = result.insertId;
+
+    // Insert items into order_items table
+    const orderItemsSql = `INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ?`;
+    const orderItemsValues = items.map((item) => [
+      orderId,
+      item.product_id,
+      item.quantity,
+      item.price,
+    ]);
+
+    connection.query(orderItemsSql, [orderItemsValues], (error) => {
+      if (error) {
+        console.error("Database error:", error);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      res.status(201).json({ order_id: orderId, user_id, total_price, status });
+    });
+  });
+});
+
+app.get("/orders", (req, res) => {
+  const { user_id } = req.query;
+
+  const ordersSql = `SELECT * FROM orders WHERE user_id = ?`;
+  connection.query(ordersSql, [user_id], (error, orders) => {
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({ error: "Database error" });
+    }
+
+    // Fetch order items and product names
+    const orderItemsSql = `SELECT order_items.order_id, order_items.product_id, order_items.quantity, order_items.price, product.name as product_name 
+                           FROM order_items
+                           JOIN product ON order_items.product_id = product.product_id
+                           WHERE order_items.order_id IN (${orders
+                             .map((order) => order.order_id)
+                             .join(",")})`;
+
+    connection.query(orderItemsSql, (error, orderItems) => {
+      if (error) {
+        console.error("Database error:", error);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      // Group order items by order_id
+      const ordersWithItems = orders.map((order) => {
+        return {
+          ...order,
+          items: orderItems.filter((item) => item.order_id === order.order_id),
+        };
+      });
+
+      res.status(200).json(ordersWithItems);
+    });
   });
 });
 
