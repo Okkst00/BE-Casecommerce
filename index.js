@@ -2,6 +2,9 @@ const express = require("express");
 const mysql = require("mysql");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
 
 const connection = mysql.createConnection({
   host: "localhost",
@@ -26,6 +29,35 @@ connection.connect((err) => {
 });
 
 app.use(cors());
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/"); // Tempat penyimpanan file
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const filename = Date.now() + ext;
+    cb(null, filename);
+  },
+});
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = "uploads/";
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      cb(null, Date.now() + path.extname(file.originalname));
+    },
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }, // Maksimal ukuran file 10MB
+});
+
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Routes
 app.get("/", (req, res) => {
@@ -67,32 +99,93 @@ app.get("/products/category/:categoryId", (req, res) => {
   });
 });
 
-app.post("/products", (req, res) => {
+// Endpoint untuk menambahkan produk
+app.post("/products", upload.array("images", 10), (req, res) => {
   const { name, description, price, stock, category_id } = req.body;
-  const INSERT_QUERY = `INSERT INTO product (name, description, price, stock, category_id) VALUES (?, ?, ?, ?, ?)`;
+  const imagePaths = req.files.map((file) => file.path);
+
+  // Query untuk memasukkan data produk
+  const INSERT_PRODUCT_QUERY = `
+    INSERT INTO product (name, description, price, stock, category_id) VALUES (?, ?, ?, ?, ?)
+  `;
+
   connection.query(
-    INSERT_QUERY,
+    INSERT_PRODUCT_QUERY,
     [name, description, price, stock, category_id],
     (error, results) => {
       if (error) {
-        console.error("Kesalahan query:", error.stack);
+        console.error("Kesalahan query produk:", error.stack);
         res.status(500).json({
-          error: "Terjadi kesalahan saat menambahkan data ke database",
+          error: "Terjadi kesalahan saat menambahkan data produk ke database",
         });
         return;
       }
-      res
-        .status(201)
-        .json({ message: "Data berhasil ditambahkan", id: results.insertId });
+
+      const productId = results.insertId;
+
+      // Query untuk memasukkan data gambar
+      const INSERT_IMAGE_QUERY = `
+        INSERT INTO product_images (product_id, image_url) 
+        VALUES ?
+      `;
+
+      const imageValues = imagePaths.map((path) => [productId, path]);
+
+      connection.query(INSERT_IMAGE_QUERY, [imageValues], (error) => {
+        if (error) {
+          console.error("Kesalahan query gambar:", error.stack);
+          res.status(500).json({
+            error: "Terjadi kesalahan saat menambahkan gambar ke database",
+          });
+          return;
+        }
+
+        // Update image_url di tabel product
+        const UPDATE_PRODUCT_QUERY = `
+          UPDATE product
+          SET image_url = ?
+          WHERE product_id = ?
+        `;
+
+        // Ambil URL gambar pertama sebagai contoh (jika lebih dari satu gambar, bisa diubah sesuai kebutuhan)
+        const firstImageUrl = imagePaths[0];
+
+        connection.query(
+          UPDATE_PRODUCT_QUERY,
+          [firstImageUrl, productId],
+          (error) => {
+            if (error) {
+              console.error("Kesalahan query update produk:", error.stack);
+              res.status(500).json({
+                error:
+                  "Terjadi kesalahan saat memperbarui data produk di database",
+              });
+              return;
+            }
+
+            res.status(201).json({
+              message: "Produk dan gambar berhasil ditambahkan",
+              id: productId,
+            });
+          }
+        );
+      });
     }
   );
 });
 
+// Memastikan direktori uploads ada
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
+
 app.get("/products", (req, res) => {
   const query = `
-    SELECT p.*, c.name AS category_name
+    SELECT p.*, c.name AS category_name, GROUP_CONCAT(pi.image_url) AS image_urls
     FROM product p
     LEFT JOIN product_category c ON p.category_id = c.id
+    LEFT JOIN product_images pi ON p.product_id = pi.product_id
+    GROUP BY p.product_id
   `;
 
   connection.query(query, (error, results) => {
@@ -101,25 +194,48 @@ app.get("/products", (req, res) => {
       res.status(500).json({ error: "Database query error" });
       return;
     }
-    res.json(results);
+
+    // Format the results to split the image URLs
+    const products = results.map((product) => {
+      product.image_urls = product.image_urls
+        ? product.image_urls.split(",")
+        : [];
+      return product;
+    });
+
+    res.json(products);
   });
 });
 
 app.get("/products/:id", (req, res) => {
-  let sql = "SELECT * FROM product WHERE product_id = ?";
-  connection.query(sql, [req.params.id], (err, result) => {
-    if (err) {
-      console.error("Error executing query:", err);
+  const query = `
+    SELECT p.*, c.name AS category_name, GROUP_CONCAT(pi.image_url) AS image_urls
+    FROM product p
+    LEFT JOIN product_category c ON p.category_id = c.id
+    LEFT JOIN product_images pi ON p.product_id = pi.product_id
+    WHERE p.product_id = ?
+    GROUP BY p.product_id
+  `;
+
+  connection.query(query, [req.params.id], (error, results) => {
+    if (error) {
+      console.error("Error executing query:", error);
       res.status(500).send({ error: "Database query failed" });
       return;
     }
 
-    if (result.length === 0) {
+    if (results.length === 0) {
       res.status(404).send({ error: "Product not found" });
       return;
     }
 
-    res.send(result[0]);
+    // Format the result to split the image URLs
+    const product = results[0];
+    product.image_urls = product.image_urls
+      ? product.image_urls.split(",")
+      : [];
+
+    res.json(product);
   });
 });
 
@@ -343,7 +459,6 @@ app.post("/orders", (req, res) => {
     }
     const orderId = result.insertId;
 
-    // Insert items into order_items table
     const orderItemsSql = `INSERT INTO order_items (order_id, product_id, quantity, price) VALUES ?`;
     const orderItemsValues = items.map((item) => [
       orderId,
@@ -373,7 +488,6 @@ app.get("/orders", (req, res) => {
       return res.status(500).json({ error: "Database error" });
     }
 
-    // Fetch order items and product names
     const orderItemsSql = `SELECT order_items.order_id, order_items.product_id, order_items.quantity, order_items.price, product.name as product_name 
                            FROM order_items
                            JOIN product ON order_items.product_id = product.product_id
@@ -397,6 +511,43 @@ app.get("/orders", (req, res) => {
 
       res.status(200).json(ordersWithItems);
     });
+  });
+});
+
+// Endpoint untuk mendapatkan detail kategori berdasarkan ID
+app.get("/categories/:id", (req, res) => {
+  const categoryId = req.params.id;
+
+  // Query untuk mengambil detail kategori berdasarkan ID
+  const query = "SELECT * FROM product_category WHERE id = ?";
+
+  connection.query(query, [categoryId], (err, results) => {
+    if (err) {
+      console.error("Database query failed:", err);
+      return res.status(500).json({ error: "Database query failed" });
+    }
+
+    // Jika kategori tidak ditemukan, kembalikan status 404
+    if (results.length === 0) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    // Kembalikan hasil (detail kategori)
+    res.status(200).json(results[0]);
+  });
+});
+
+app.get("/category/:id/products", (req, res) => {
+  const categoryId = req.params.id;
+  const query = "SELECT * FROM product WHERE category_id = ?";
+
+  connection.query(query, [categoryId], (err, results) => {
+    if (err) {
+      console.error("Database query failed:", err);
+      return res.status(500).json({ error: "Database query failed" });
+    }
+    // Selalu kembalikan status 200 dan array, meskipun tidak ada produk
+    res.status(200).json(results);
   });
 });
 
