@@ -5,6 +5,10 @@ const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
+const { isAuthenticated, hasRole } = require("./middlewares/auth");
+const authenticateUser = require("./middlewares/authUser");
 
 const connection = mysql.createConnection({
   host: "localhost",
@@ -28,7 +32,18 @@ connection.connect((err) => {
   console.log("Terhubung dengan database MySQL dengan id", connection.threadId);
 });
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:3000", // Ubah dengan URL frontend Anda
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.use((req, res, next) => {
+  console.log("Request headers:", req.headers); // Log semua header
+  next();
+});
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -59,12 +74,9 @@ const upload = multer({
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// Routes
-app.get("/", (req, res) => {
-  res.send("API is working");
-});
+app.get("/categories", isAuthenticated, hasRole("admin"), (req, res) => {
+  console.log("User role:", req.user.role);
 
-app.get("/categories", (req, res) => {
   const SELECT_QUERY = "SELECT id, name FROM product_category";
   connection.query(SELECT_QUERY, (error, results) => {
     if (error) {
@@ -78,15 +90,93 @@ app.get("/categories", (req, res) => {
   });
 });
 
-// server.js (atau file yang sesuai untuk server Anda)
+app.post("/register", (req, res) => {
+  const { username, password, role } = req.body;
+
+  bcrypt.hash(password, 10, (err, hashedPassword) => {
+    if (err) {
+      return res.status(500).json({ error: "Hashing failed" });
+    }
+
+    const query =
+      "INSERT INTO users (username, password, role) VALUES (?, ?, ?)";
+    connection.query(query, [username, hashedPassword, role], (error) => {
+      if (error) {
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.status(201).json({ message: "User registered successfully" });
+    });
+  });
+});
+
+app.post("/login", (req, res) => {
+  const { email, password } = req.body;
+
+  const query = "SELECT * FROM users WHERE email = ?";
+  connection.query(query, [email], async (err, results) => {
+    if (err) {
+      console.error("Database query error:", err);
+      return res.status(500).json({ message: "Database query error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    const user = results[0];
+    try {
+      const isMatch = await bcrypt.compare(password, user.password);
+
+      if (!isMatch) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      // Generate token JWT
+      const token = jwt.sign(
+        { id: user.id, email: user.email, role: user.role },
+        "your_jwt_secret_key",
+        { expiresIn: "1h" }
+      );
+
+      res.status(200).json({ token, userId: user.id }); // Mengirimkan userId dalam respons
+    } catch (error) {
+      console.error("Error comparing passwords or generating token:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+});
+
+app.get("/user/:id", (req, res) => {
+  const userId = req.params.id;
+
+  const query = "SELECT username, email FROM users WHERE id = ?";
+  connection.query(query, [userId], (err, results) => {
+    if (err) {
+      console.error("Database query error:", err); // Log detail error
+      return res.status(500).json({ message: "Database query error" });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = results[0];
+    res.status(200).json({ name: user.username, email: user.email });
+  });
+});
+
+app.get("/", (req, res) => {
+  res.send("API is working");
+});
+
 app.get("/products/category/:categoryId", (req, res) => {
   const categoryId = req.params.categoryId;
 
   const SELECT_QUERY = `
-    SELECT p.id, p.name, p.description, p.price, p.stock
-    FROM product p
-    WHERE p.category_id = ?
-  `;
+      SELECT p.id, p.name, p.description, p.price, p.stock
+      FROM product p
+      WHERE p.category_id = ?
+    `;
 
   connection.query(SELECT_QUERY, [categoryId], (error, results) => {
     if (error) {
@@ -99,7 +189,6 @@ app.get("/products/category/:categoryId", (req, res) => {
   });
 });
 
-// Endpoint untuk menambahkan produk
 app.post("/products", upload.array("images", 10), (req, res) => {
   const { name, description, price, stock, category_id } = req.body;
   const imagePaths = req.files.map((file) => file.path);
@@ -260,16 +349,20 @@ app.delete("/products/:id", (req, res) => {
   });
 });
 
-app.post("/cart", (req, res) => {
-  const { userId, productId, quantity } = req.body;
+app.post("/cart", authenticateUser, (req, res) => {
+  const { productId, quantity } = req.body;
+  const userId = req.user.id;
+  // Validasi input
+  if (!userId || !productId || typeof quantity !== "number" || quantity <= 0) {
+    return res.status(400).send({ error: "Invalid input" });
+  }
 
   // Check if the cart exists for the user, if not create one
   let sql = "SELECT cart_id FROM cart WHERE user_id = ?";
   connection.query(sql, [userId], (err, result) => {
     if (err) {
       console.error("Error executing query:", err);
-      res.status(500).send({ error: "Database query failed" });
-      return;
+      return res.status(500).send({ error: "Database query failed" });
     }
 
     let cartId;
@@ -280,8 +373,7 @@ app.post("/cart", (req, res) => {
       connection.query(insertCartSql, [userId], (err, result) => {
         if (err) {
           console.error("Error executing query:", err);
-          res.status(500).send({ error: "Database query failed" });
-          return;
+          return res.status(500).send({ error: "Database query failed" });
         }
 
         cartId = result.insertId;
@@ -300,8 +392,7 @@ app.post("/cart", (req, res) => {
     connection.query(checkCartItemSql, [cartId, productId], (err, result) => {
       if (err) {
         console.error("Error executing query:", err);
-        res.status(500).send({ error: "Database query failed" });
-        return;
+        return res.status(500).send({ error: "Database query failed" });
       }
 
       if (result.length > 0) {
@@ -314,8 +405,7 @@ app.post("/cart", (req, res) => {
           (err, result) => {
             if (err) {
               console.error("Error executing query:", err);
-              res.status(500).send({ error: "Database query failed" });
-              return;
+              return res.status(500).send({ error: "Database query failed" });
             }
 
             // Retrieve updated cart item to ensure correctness
@@ -325,8 +415,9 @@ app.post("/cart", (req, res) => {
               (err, updatedResult) => {
                 if (err) {
                   console.error("Error executing query:", err);
-                  res.status(500).send({ error: "Database query failed" });
-                  return;
+                  return res
+                    .status(500)
+                    .send({ error: "Database query failed" });
                 }
 
                 res.send(updatedResult[0]); // Send updated item details
@@ -344,8 +435,7 @@ app.post("/cart", (req, res) => {
           (err, result) => {
             if (err) {
               console.error("Error executing query:", err);
-              res.status(500).send({ error: "Database query failed" });
-              return;
+              return res.status(500).send({ error: "Database query failed" });
             }
 
             // Retrieve newly added cart item to ensure correctness
@@ -355,8 +445,9 @@ app.post("/cart", (req, res) => {
               (err, updatedResult) => {
                 if (err) {
                   console.error("Error executing query:", err);
-                  res.status(500).send({ error: "Database query failed" });
-                  return;
+                  return res
+                    .status(500)
+                    .send({ error: "Database query failed" });
                 }
 
                 res.send(updatedResult[0]); // Send new item details
