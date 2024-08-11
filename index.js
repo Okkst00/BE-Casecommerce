@@ -41,7 +41,7 @@ app.use(
 );
 
 app.use((req, res, next) => {
-  console.log("Request headers:", req.headers); // Log semua header
+  console.log("Headers:", req.headers); // Log semua header
   next();
 });
 
@@ -74,9 +74,7 @@ const upload = multer({
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-app.get("/categories", isAuthenticated, hasRole("admin"), (req, res) => {
-  console.log("User role:", req.user.role);
-
+app.get("/categories", (req, res) => {
   const SELECT_QUERY = "SELECT id, name FROM product_category";
   connection.query(SELECT_QUERY, (error, results) => {
     if (error) {
@@ -89,6 +87,22 @@ app.get("/categories", isAuthenticated, hasRole("admin"), (req, res) => {
     res.status(200).json(results);
   });
 });
+
+// app.get("/categories", isAuthenticated, hasRole("admin"), (req, res) => {
+//   console.log("User role:", req.user.role);
+
+//   const SELECT_QUERY = "SELECT id, name FROM product_category";
+//   connection.query(SELECT_QUERY, (error, results) => {
+//     if (error) {
+//       console.error("Kesalahan query:", error.stack);
+//       res
+//         .status(500)
+//         .json({ error: "Terjadi kesalahan saat mengambil data dari database" });
+//       return;
+//     }
+//     res.status(200).json(results);
+//   });
+// });
 
 app.post("/register", (req, res) => {
   const { username, password, role } = req.body;
@@ -131,7 +145,6 @@ app.post("/login", (req, res) => {
         return res.status(401).json({ message: "Invalid credentials" });
       }
 
-      // Generate token JWT
       const token = jwt.sign(
         { id: user.id, email: user.email, role: user.role },
         "your_jwt_secret_key",
@@ -165,6 +178,23 @@ app.get("/user/:id", (req, res) => {
   });
 });
 
+app.post("/logout", (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+
+  if (token) {
+    const query = "INSERT INTO token_blacklist (token) VALUES (?)";
+    connection.query(query, [token], (err) => {
+      if (err) {
+        console.error("Database error:", err);
+        return res.status(500).json({ message: "Error logging out" });
+      }
+      res.status(200).json({ message: "Logged out successfully" });
+    });
+  } else {
+    res.status(400).json({ message: "No token provided" });
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("API is working");
 });
@@ -195,7 +225,8 @@ app.post("/products", upload.array("images", 10), (req, res) => {
 
   // Query untuk memasukkan data produk
   const INSERT_PRODUCT_QUERY = `
-    INSERT INTO product (name, description, price, stock, category_id) VALUES (?, ?, ?, ?, ?)
+    INSERT INTO product (name, description, price, stock, category_id) 
+    VALUES (?, ?, ?, ?, ?)
   `;
 
   connection.query(
@@ -204,15 +235,13 @@ app.post("/products", upload.array("images", 10), (req, res) => {
     (error, results) => {
       if (error) {
         console.error("Kesalahan query produk:", error.stack);
-        res.status(500).json({
+        return res.status(500).json({
           error: "Terjadi kesalahan saat menambahkan data produk ke database",
         });
-        return;
       }
 
       const productId = results.insertId;
 
-      // Query untuk memasukkan data gambar
       const INSERT_IMAGE_QUERY = `
         INSERT INTO product_images (product_id, image_url) 
         VALUES ?
@@ -223,21 +252,18 @@ app.post("/products", upload.array("images", 10), (req, res) => {
       connection.query(INSERT_IMAGE_QUERY, [imageValues], (error) => {
         if (error) {
           console.error("Kesalahan query gambar:", error.stack);
-          res.status(500).json({
+          return res.status(500).json({
             error: "Terjadi kesalahan saat menambahkan gambar ke database",
           });
-          return;
         }
 
-        // Update image_url di tabel product
+        const firstImageUrl = imagePaths[0];
+
         const UPDATE_PRODUCT_QUERY = `
           UPDATE product
           SET image_url = ?
           WHERE product_id = ?
         `;
-
-        // Ambil URL gambar pertama sebagai contoh (jika lebih dari satu gambar, bisa diubah sesuai kebutuhan)
-        const firstImageUrl = imagePaths[0];
 
         connection.query(
           UPDATE_PRODUCT_QUERY,
@@ -245,11 +271,10 @@ app.post("/products", upload.array("images", 10), (req, res) => {
           (error) => {
             if (error) {
               console.error("Kesalahan query update produk:", error.stack);
-              res.status(500).json({
+              return res.status(500).json({
                 error:
                   "Terjadi kesalahan saat memperbarui data produk di database",
               });
-              return;
             }
 
             res.status(201).json({
